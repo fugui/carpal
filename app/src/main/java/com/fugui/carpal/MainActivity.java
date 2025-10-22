@@ -2,8 +2,10 @@ package com.fugui.carpal;
 
 import android.Manifest;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.util.Log;
+import android.widget.ImageView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -16,7 +18,7 @@ import java.io.IOException;
 
 import ai.onnxruntime.OrtException;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements DetectionCallback {
 
     private static final String TAG = "MainActivity";
     private static final int REQUEST_CODE_PERMISSIONS = 10;
@@ -24,11 +26,14 @@ public class MainActivity extends AppCompatActivity {
 
     private CameraController cameraController;
     private VehicleDetector vehicleDetector;
+    private ImageView imageView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        imageView = findViewById(R.id.imageView);
 
         try {
             // IMPORTANT: Replace "yolo_model.onnx" with the actual name of your model file in the assets folder.
@@ -41,14 +46,12 @@ public class MainActivity extends AppCompatActivity {
         }
 
         PreviewView viewFinder = findViewById(R.id.viewFinder);
-        // We will update the CameraController to accept the detector in the next step.
-        cameraController = new CameraController(this, this, viewFinder, vehicleDetector);
+        cameraController = new CameraController(this, this, viewFinder, vehicleDetector, this);
 
         if (allPermissionsGranted()) {
             cameraController.startCamera();
         } else {
-            ActivityCompat.requestPermissions(
-                    this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS);
+            ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS);
         }
     }
 
@@ -80,5 +83,10 @@ public class MainActivity extends AppCompatActivity {
         if (cameraController != null) {
             cameraController.stopCamera();
         }
+    }
+
+    @Override
+    public void onDetections(Bitmap imageWithDetections) {
+        runOnUiThread(() -> imageView.setImageBitmap(imageWithDetections));
     }
 }

@@ -46,7 +46,7 @@ public class YoloModelDetector {
 
         // Fallback to hardcoded labels as the current ONNX runtime version might not support metadata reading.
         this.labels = extractLabelsFromMetadata();
-        Log.i(TAG, "Loaded label: " + Arrays.stream(labels).collect(Collectors.joining(", ")));
+        Log.i(TAG, "Loaded label: " + String.join(", ", labels));
     }
 
     public String[] extractLabelsFromMetadata() throws OrtException {
@@ -116,7 +116,6 @@ public class YoloModelDetector {
                 }
             }
         } catch (Exception e) {
-            e.printStackTrace();
             labelList = getDefaultCOCOLabels();
         }
     }

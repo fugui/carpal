@@ -2,6 +2,11 @@ package com.fugui.carpal;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.media.Image;
 import android.util.Log;
 
@@ -17,6 +22,7 @@ import androidx.lifecycle.LifecycleOwner;
 
 import com.google.common.util.concurrent.ListenableFuture;
 
+import java.io.InputStream;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,13 +35,26 @@ public class CameraController {
     private final LifecycleOwner lifecycleOwner;
     private final PreviewView previewView;
     private final VehicleDetector vehicleDetector;
+    private final DetectionCallback detectionCallback;
     private ExecutorService cameraExecutor;
 
-    public CameraController(Context context, LifecycleOwner lifecycleOwner, PreviewView previewView, VehicleDetector vehicleDetector) {
+    private static  Bitmap debugPicture;
+
+    public CameraController(Context context, LifecycleOwner lifecycleOwner, PreviewView previewView, VehicleDetector vehicleDetector, DetectionCallback detectionCallback) {
         this.context = context;
         this.lifecycleOwner = lifecycleOwner;
         this.previewView = previewView;
         this.vehicleDetector = vehicleDetector;
+        this.detectionCallback = detectionCallback;
+
+
+        try (InputStream inputStream = context.getAssets().open("road.jpeg")) {
+            debugPicture = BitmapFactory.decodeStream(inputStream);
+        } catch (Exception e) {
+            debugPicture = null;
+        }
+
+
     }
 
     public void startCamera() {
@@ -53,7 +72,7 @@ public class CameraController {
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
 
-                imageAnalysis.setAnalyzer(cameraExecutor, new FrameAnalyzer(vehicleDetector));
+                imageAnalysis.setAnalyzer(cameraExecutor, new FrameAnalyzer(vehicleDetector, detectionCallback));
 
                 cameraProvider.unbindAll();
                 cameraProvider.bindToLifecycle(
@@ -67,11 +86,13 @@ public class CameraController {
 
     private static class FrameAnalyzer implements ImageAnalysis.Analyzer {
         private final VehicleDetector vehicleDetector;
+        private final DetectionCallback detectionCallback;
         private final AtomicLong lastAnalyzedTimestamp = new AtomicLong(0);
         private static final long ANALYSIS_INTERVAL_MS = 2000; // 2 seconds
 
-        public FrameAnalyzer(VehicleDetector vehicleDetector) {
+        public FrameAnalyzer(VehicleDetector vehicleDetector, DetectionCallback detectionCallback) {
             this.vehicleDetector = vehicleDetector;
+            this.detectionCallback = detectionCallback;
         }
 
         @Override
@@ -80,16 +101,32 @@ public class CameraController {
             if (currentTime - lastAnalyzedTimestamp.get() >= ANALYSIS_INTERVAL_MS) {
                 lastAnalyzedTimestamp.set(currentTime);
 
-                Bitmap bitmap = imageProxy.toBitmap();
+                Bitmap bitmap =  debugPicture; // imageProxy.toBitmap();
                 if (bitmap != null) {
+
                     List<DetectionResult> detections = vehicleDetector.detect(bitmap);
-                    if (!detections.isEmpty()) {
-                        Log.d(TAG, "Detected " + detections.size() + " vehicles.");
-                        // We will process these detections in the next steps.
-                    }
+                    Bitmap imageWithDetections = drawDetections(bitmap, detections);
+                    detectionCallback.onDetections(imageWithDetections);
                 }
             }
             imageProxy.close();
+        }
+
+        private Bitmap drawDetections(Bitmap bitmap, List<DetectionResult> detections) {
+            Bitmap mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true);
+            Canvas canvas = new Canvas(mutableBitmap);
+            Paint paint = new Paint();
+            paint.setColor(Color.RED);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(4.0f);
+            paint.setTextSize(40.0f);
+
+            for (DetectionResult detection : detections) {
+                canvas.drawRect(detection.getBoundingBox(), paint);
+                String label = detection.getClassName() + ": " + String.format("%.2f", detection.getConfidence());
+                canvas.drawText(label, detection.getBoundingBox().left, detection.getBoundingBox().top - 10, paint);
+            }
+            return mutableBitmap;
         }
     }
 

@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">CarPal</string>
+    <string name="detection_results">Detection results</string>
 </resources>
