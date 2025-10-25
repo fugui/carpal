@@ -7,7 +7,6 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
-import android.media.Image;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -20,25 +19,17 @@ import androidx.camera.view.PreviewView;
 import androidx.core.content.ContextCompat;
 import androidx.lifecycle.LifecycleOwner;
 
-import com.google.android.gms.tasks.OnFailureListener;
-import com.google.android.gms.tasks.OnSuccessListener;
-import com.google.android.gms.tasks.Task;
-import com.google.android.gms.tasks.Tasks;
-import com.google.mlkit.vision.common.InputImage;
-import com.google.mlkit.vision.text.Text;
-import com.google.mlkit.vision.text.TextRecognition;
-import com.google.mlkit.vision.text.TextRecognizer;
-import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions;
-
 import com.google.common.util.concurrent.ListenableFuture;
 
+import java.io.IOException;
 import java.io.InputStream;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
+
+import ai.onnxruntime.OrtException;
 
 public class CameraController {
 
@@ -50,7 +41,7 @@ public class CameraController {
     private final DetectionCallback detectionCallback;
     private ExecutorService cameraExecutor;
 
-    private static Bitmap debugPicture;
+    private static Bitmap debugPicture = null;
 
     public CameraController(Context context, LifecycleOwner lifecycleOwner, PreviewView previewView, VehicleDetector vehicleDetector, DetectionCallback detectionCallback) {
         this.context = context;
@@ -60,13 +51,10 @@ public class CameraController {
         this.detectionCallback = detectionCallback;
 
 
-        try (InputStream inputStream = context.getAssets().open("road1.jpeg")) {
+        try (InputStream inputStream = context.getAssets().open("road.jpeg")) {
             debugPicture = BitmapFactory.decodeStream(inputStream);
-        } catch (Exception e) {
-            debugPicture = null;
+        } catch (Exception ignored) {
         }
-
-
     }
 
     public void startCamera() {
@@ -84,7 +72,7 @@ public class CameraController {
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
 
-                imageAnalysis.setAnalyzer(cameraExecutor, new FrameAnalyzer(vehicleDetector, detectionCallback));
+                imageAnalysis.setAnalyzer(cameraExecutor, new FrameAnalyzer(context, vehicleDetector, detectionCallback));
 
                 cameraProvider.unbindAll();
                 cameraProvider.bindToLifecycle(
@@ -101,10 +89,21 @@ public class CameraController {
         private final DetectionCallback detectionCallback;
         private final AtomicLong lastAnalyzedTimestamp = new AtomicLong(0);
         private static final long ANALYSIS_INTERVAL_MS = 2000; // 2 seconds
+        private final PaddleOrtEngine paddleOrtEngine;
 
-        public FrameAnalyzer(VehicleDetector vehicleDetector, DetectionCallback detectionCallback) {
+        public FrameAnalyzer(Context context, VehicleDetector vehicleDetector, DetectionCallback detectionCallback) {
             this.vehicleDetector = vehicleDetector;
             this.detectionCallback = detectionCallback;
+
+            PaddleOrtEngine temp = null;
+            try {
+                temp = new PaddleOrtEngine(context.getAssets(), "det.onnx", "cls.onnx", "rec.onnx", "dict.txt");
+            } catch (IOException | OrtException e) {
+                Log.e(TAG, "Error initializing PaddleOrtEngine", e);
+            }
+            paddleOrtEngine = temp;
+            Log.i(TAG, "Created PaddleOrtEngine: " + paddleOrtEngine);
+
         }
 
         @Override
@@ -113,7 +112,7 @@ public class CameraController {
             if (currentTime - lastAnalyzedTimestamp.get() >= ANALYSIS_INTERVAL_MS) {
                 lastAnalyzedTimestamp.set(currentTime);
 
-                Bitmap bitmap = imageProxy.toBitmap(); // debugImage
+                Bitmap bitmap = debugPicture; // imageProxy.toBitmap(); //
                 if (bitmap != null) {
 
                     List<DetectionResult> detections = vehicleDetector.detect(bitmap);
@@ -126,48 +125,24 @@ public class CameraController {
 
         private void textRecognizeDetections(Bitmap bitmap, List<DetectionResult> detections) {
 
-            TextRecognizer recognizer = TextRecognition.getClient(new ChineseTextRecognizerOptions.Builder().build());
+            detections.forEach(detection -> {
+                Log.i(TAG, "OCR Start for : " + detection.getClassName() );
 
+                RectF rectF = detection.getBoundingBox();
+                Bitmap oneCar = Bitmap.createBitmap(bitmap, (int) rectF.left, (int) rectF.top, (int) rectF.width(), (int) rectF.height());
+                try {
+                    PaddleOrtEngine.OcrResult ocrResult = paddleOrtEngine.runOcr(oneCar);
 
-            List<Task<Text>> listTasks = detections.stream().map(detection -> {
-                        RectF rectF = detection.getBoundingBox();
+                    Log.i(TAG, "OCR Result: " + ocrResult);
 
-                        InputImage image = InputImage.fromBitmap(
-                                Bitmap.createBitmap(bitmap, (int) rectF.left, (int) rectF.top, (int) rectF.width(), (int) rectF.height()),
-                                0);
-                        return recognizer.process(image);
-                    }
-            ).collect(Collectors.toList());
+                    String text = ocrResult.texts.stream().collect(Collectors.joining(","));
+                    detection.setText(text);
+                } catch (OrtException e) {
+                    Log.e(TAG, "OCR Text recognize failed: " + e.getMessage());
+                }
+            });
 
-            Tasks.whenAllComplete(listTasks)
-                    .addOnCompleteListener(result -> {
-                        if (!result.isSuccessful())
-                            return;
-                        List<Task<?>> completedTasks = result.getResult();
-
-                        for (int i = 0; i < completedTasks.size(); i++) {
-                            Text visionText = (Text) completedTasks.get(i).getResult();
-                            String resultText = visionText.getText();
-                            Log.i(TAG, "Recognized Text: " + resultText);
-//                            for (Text.TextBlock block : visionText.getTextBlocks()) {
-//                                String blockText = block.getText();
-//                                Log.i(TAG, "TextBlock: " + blockText);
-//                                for (Text.Line line : block.getLines()) {
-//                                    String lineText = line.getText();
-//                                    Log.i(TAG, "  Line: " + lineText);
-//                                    for (Text.Element element : line.getElements()) {
-//                                        String elementText = element.getText();
-//                                        Log.i(TAG, "    Element: " + elementText);
-//                                    }
-//                                }
-//                            }
-                            detections.get(i).setText( String.join( " ", resultText.split("\n")));
-                        }
-
-
-                        detectionCallback.onDetections( drawDetections( bitmap, detections  ));
-                    })
-                    .addOnFailureListener(e -> Log.e(TAG, "Text recognition failed.", e));
+            detectionCallback.onDetections(drawDetections(bitmap, detections));
         }
 
         private Bitmap drawDetections(Bitmap bitmap, List<DetectionResult> detections) {
@@ -183,7 +158,8 @@ public class CameraController {
                 canvas.drawRect(detection.getBoundingBox(), paint);
                 String label = detection.getClassName() + ": " + String.format("%.2f", detection.getConfidence());
                 canvas.drawText(label, detection.getBoundingBox().left, detection.getBoundingBox().top - 10, paint);
-                canvas.drawText(detection.getText(), detection.getBoundingBox().left, detection.getBoundingBox().top + 25, paint);
+                if (detection.getText() != null && !detection.getText().isEmpty())
+                    canvas.drawText(detection.getText(), detection.getBoundingBox().left, detection.getBoundingBox().top + 25, paint);
             }
             return mutableBitmap;
         }

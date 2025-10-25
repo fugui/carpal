@@ -39,10 +39,11 @@ public class PaddleOrtEngine implements Closeable {
     private OrtSession createSession(AssetManager am, String path)
             throws IOException, OrtException {
         byte[] raw = readAsset(am, path);
-        return env.createSession(raw,
-                new OrtSession.SessionOptions()
-                        .addCPU()
-                        .setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT));
+        OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
+        opts.addCPU(true);                       //  void
+        opts.setOptimizationLevel(
+                OrtSession.SessionOptions.OptLevel.ALL_OPT); //  void
+        return env.createSession(raw, opts);
     }
 
     /* ========== 1. 检测 ========== */
