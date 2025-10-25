@@ -133,9 +133,9 @@ public class CameraController {
                 try {
                     PaddleOrtEngine.OcrResult ocrResult = paddleOrtEngine.runOcr(oneCar);
 
-                    Log.i(TAG, "OCR Result: " + ocrResult);
-
                     String text = ocrResult.texts.stream().collect(Collectors.joining(","));
+                    Log.i(TAG, "OCR Result: " + text);
+
                     detection.setText(text);
                 } catch (OrtException e) {
                     Log.e(TAG, "OCR Text recognize failed: " + e.getMessage());

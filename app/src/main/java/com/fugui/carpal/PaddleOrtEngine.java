@@ -4,6 +4,7 @@ import ai.onnxruntime.*;
 
 import android.content.res.AssetManager;
 import android.graphics.*;
+import android.util.Log;
 
 import java.io.*;
 import java.nio.*;
@@ -18,6 +19,7 @@ public class PaddleOrtEngine implements Closeable {
 
     private static final float[] MEAN = {0.485f, 0.456f, 0.406f};
     private static final float[] STD = {0.229f, 0.224f, 0.225f};
+    private static final String TAG = "ocr";
 
     /* ========== 成员 ========== */
     private final OrtEnvironment env;
@@ -160,8 +162,11 @@ public class PaddleOrtEngine implements Closeable {
     public OcrResult runOcr(Bitmap src) throws OrtException {
         List<RotatedBox> boxes = detect(src);
         List<String> texts = new ArrayList<>();
+        // 重新计算在 detect() 方法内部使用的缩放比例，用于将坐标映射回来
+        float scale = Math.min((float) DET_SHAPE[3] / src.getWidth(), (float) DET_SHAPE[2] / src.getHeight());
+
         for (RotatedBox b : boxes) {
-            Bitmap crop = cropBox(src, b);
+            Bitmap crop = cropBox(src, b, scale);
             if (isRotated180(crop)) {
                 crop = rotate180(crop);
             }
@@ -226,10 +231,30 @@ public class PaddleOrtEngine implements Closeable {
         return Bitmap.createScaledBitmap(src, w, h, true);
     }
 
-    private Bitmap cropBox(Bitmap src, RotatedBox box) {
+    private Bitmap cropBox(Bitmap src, RotatedBox box, float scale) {
         // 简易版：先按水平外接矩形扣图，实际可写透视变换
         Rect r = box.bound();
-        return Bitmap.createBitmap(src, r.left, r.top, r.width(), r.height());
+        // 检测框的坐标是基于缩放后图片的，需要通过除以缩放比例，还原到原始图片坐标系中
+        int left = (int) (r.left / scale);
+        int top = (int) (r.top / scale);
+        int right = (int) (r.right / scale);
+        int bottom = (int) (r.bottom / scale);
+
+        // 裁剪坐标以确保它们在源位图的边界内，防止越界错误
+        left = Math.max(0, left);
+        top = Math.max(0, top);
+        right = Math.min(src.getWidth(), right);
+        bottom = Math.min(src.getHeight(), bottom);
+
+        int width = right - left;
+        int height = bottom - top;
+
+        // 如果裁剪区域无效，则返回一个占位符位图以避免后续错误
+        if (width <= 0 || height <= 0) {
+            return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
+        }
+
+        return Bitmap.createBitmap(src, left, top, width, height);
     }
 
     private Bitmap rotate180(Bitmap bmp) {
@@ -252,6 +277,8 @@ public class PaddleOrtEngine implements Closeable {
     }
 
     private String idxToStr(int[] idx) {
+
+        Log.i(TAG, "idxToStr: " + Arrays.toString(idx));
         StringBuilder sb = new StringBuilder();
         for (int i : idx) if (i < labelList.size()) sb.append(labelList.get(i));
         return sb.toString();
