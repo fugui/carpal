@@ -97,7 +97,7 @@ public class CameraController {
 
             PaddleOrtEngine temp = null;
             try {
-                temp = new PaddleOrtEngine(context.getAssets(), "det.onnx", "cls.onnx", "rec.onnx", "dict.txt");
+                temp = new PaddleOrtEngine(context, "det.onnx", "cls.onnx", "rec.onnx", "dict.txt");
             } catch (IOException | OrtException e) {
                 Log.e(TAG, "Error initializing PaddleOrtEngine", e);
             }
@@ -126,7 +126,7 @@ public class CameraController {
         private void textRecognizeDetections(Bitmap bitmap, List<DetectionResult> detections) {
 
             detections.forEach(detection -> {
-                Log.i(TAG, "OCR Start for : " + detection.getClassName() );
+                Log.i(TAG, "OCR Start for : " + detection.getClassName());
 
                 RectF rectF = detection.getBoundingBox();
                 Bitmap oneCar = Bitmap.createBitmap(bitmap, (int) rectF.left, (int) rectF.top, (int) rectF.width(), (int) rectF.height());
@@ -138,7 +138,7 @@ public class CameraController {
 
                     detection.setText(text);
                 } catch (OrtException e) {
-                    Log.e(TAG, "OCR Text recognize failed: " + e.getMessage());
+                    Log.e(TAG, "OCR Text recognize failed: ", e);
                 }
             });
 

@@ -2,8 +2,14 @@ package com.fugui.carpal;
 
 import ai.onnxruntime.*;
 
+import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.content.Context;
 import android.content.res.AssetManager;
 import android.graphics.*;
+import android.net.Uri;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.util.Log;
 
 import java.io.*;
@@ -13,7 +19,7 @@ import java.util.*;
 public class PaddleOrtEngine implements Closeable {
 
     /* ========== 静态配置 ========== */
-    private static final int[] DET_SHAPE = {1, 3, 736, 1280};  // det 动态 shape 也可以
+    private static final int[] DET_SHAPE = {1, 3, 736, 1280};
     private static final int[] CLS_SHAPE = {1, 3, 48, 192};
     private static final int[] REC_SHAPE = {1, 3, 48, 320};
 
@@ -24,13 +30,16 @@ public class PaddleOrtEngine implements Closeable {
     /* ========== 成员 ========== */
     private final OrtEnvironment env;
     private final OrtSession detSession, clsSession, recSession;
-    private final List<String> labelList;          // 字符表
+    private final List<String> labelList;
+    private final Context context;
 
     /* ========== 构造 ========== */
-    public PaddleOrtEngine(AssetManager am,
+    public PaddleOrtEngine(Context context,
                            String detPath, String clsPath,
                            String recPath, String dictPath)
             throws IOException, OrtException {
+        this.context = context;
+        AssetManager am = context.getAssets();
         env = OrtEnvironment.getEnvironment();
         detSession = createSession(am, detPath);
         clsSession = createSession(am, clsPath);
@@ -42,42 +51,37 @@ public class PaddleOrtEngine implements Closeable {
             throws IOException, OrtException {
         byte[] raw = readAsset(am, path);
         OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
-        opts.addCPU(true);                       //  void
-        opts.setOptimizationLevel(
-                OrtSession.SessionOptions.OptLevel.ALL_OPT); //  void
+        opts.addCPU(true);
+        opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
         return env.createSession(raw, opts);
     }
 
     /* ========== 1. 检测 ========== */
-    /* ================= 1. 检测主函数 ================= */
-    public List<RotatedBox> detect(Bitmap src) throws OrtException {
-        // 1. 等比缩放至模型输入尺寸（736×1280）
-        Bitmap bmp = resizeKeepAspect(src, DET_SHAPE[2], DET_SHAPE[3]);
-        try (OnnxTensor tensor = bitmapToTensor(bmp, DET_SHAPE);   // shape [1,3,H,W]
-             OrtSession.Result res = detSession.run(Map.of("x", tensor))) {
+    public DetectResult detect(Bitmap src) throws OrtException {
+        ResizeResult resizeResult = resizeKeepAspect(src, DET_SHAPE[2], DET_SHAPE[3]);
+        Bitmap bmp = resizeResult.bitmap;
 
-            // 2. 取概率图：DB 输出节点默认叫 "sigmoid_0.tmp_0"
-            float[][] probMap = ((float[][][][]) res.get(0).getValue())[0][0]; // [H,W]
-
-            // 3. 后处理 -> 多边形框
-            return postDb(probMap, 0.3f, 0.5f);
+        try (OnnxTensor tensor = bitmapToTensor(bmp, DET_SHAPE)) {
+            OrtSession.Result res = detSession.run(Map.of("x", tensor));
+            float[][] probMap = ((float[][][][]) res.get(0).getValue())[0][0];
+            List<RotatedBox> boxes = postDb(probMap, 0.3f, 0.5f);
+            return new DetectResult(boxes, resizeResult.scale, resizeResult.padW, resizeResult.padH);
+        } finally {
+            if (bmp != null && !bmp.isRecycled()) {
+                bmp.recycle();
+            }
         }
     }
 
-    /* ================= 2. DB 后处理 ================= */
-    private List<RotatedBox> postDb(float[][] prob,
-                                    float thresh,
-                                    float boxThresh) {
+    private List<RotatedBox> postDb(float[][] prob, float thresh, float boxThresh) {
         int H = prob.length;
         int W = prob[0].length;
 
-        /* 2.1 二值化 */
         boolean[][] bitmap = new boolean[H][W];
         for (int i = 0; i < H; i++)
             for (int j = 0; j < W; j++)
                 bitmap[i][j] = prob[i][j] > thresh;
 
-        /* 2.2 连通域搜索（4-邻域） */
         List<List<int[]>> contours = new ArrayList<>();
         boolean[][] vis = new boolean[H][W];
         int[] dx = {1, -1, 0, 0}, dy = {0, 0, 1, -1};
@@ -99,21 +103,17 @@ public class PaddleOrtEngine implements Closeable {
                         queue.add(new int[]{ni, nj});
                     }
                 }
-                if (component.size() > 50)   // 过滤极小噪声
-                    contours.add(component);
+                if (component.size() > 10) contours.add(component);
             }
         }
 
-        /* 2.3 最小面积矩形（简单版：直接求外接凸包 + 旋转卡壳可再升级） */
         List<RotatedBox> result = new ArrayList<>();
         for (List<int[]> pts : contours) {
-            // 计算平均得分
             float score = 0;
             for (int[] p : pts) score += prob[p[0]][p[1]];
             score /= pts.size();
             if (score < boxThresh) continue;
 
-            // 求外接矩形（这里用最简轴对齐矩形，生产环境可改用旋转矩形）
             int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE;
             int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE;
             for (int[] p : pts) {
@@ -122,7 +122,16 @@ public class PaddleOrtEngine implements Closeable {
                 minY = Math.min(minY, p[0]);
                 maxY = Math.max(maxY, p[0]);
             }
-            // 4 个点顺时针
+
+            int boxHeight = maxY - minY;
+            // Reduced the padding to 50% of the height plus a small constant.
+            int padding = (int) (boxHeight * 0.5) + 3;
+
+            minX = Math.max(0, minX - padding);
+            maxX = Math.min(W, maxX + padding);
+            minY = Math.max(0, minY - padding);
+            maxY = Math.min(H, maxY + padding);
+
             PointF[] pf = new PointF[4];
             pf[0] = new PointF(minX, minY);
             pf[1] = new PointF(maxX, minY);
@@ -133,114 +142,117 @@ public class PaddleOrtEngine implements Closeable {
         return result;
     }
 
-    /* ========== 2. 方向分类 ========== */
+    /* ========== 2. 方向分类 & 3. 识别 ========== */
     public boolean isRotated180(Bitmap crop) throws OrtException {
-        Bitmap bmp = Bitmap.createScaledBitmap(crop, CLS_SHAPE[3], CLS_SHAPE[2], true);
-        try (OnnxTensor tensor = bitmapToTensor(bmp, CLS_SHAPE);   // [1,3,48,192]
-             OrtSession.Result res = clsSession.run(Map.of("x", tensor))) {
-
-            // 输出节点 softmax_0.tmp_0 形状 (1,2)
-            float[][] prob = (float[][]) res.get(0).getValue();   // 只有 1 行
-            return prob[0][1] > 0.5f;   // label=1 表示 180°
+        ResizeResult resizeResult = resizeKeepAspect(crop, CLS_SHAPE[2], CLS_SHAPE[3]);
+        Bitmap bmp = resizeResult.bitmap;
+        try (OnnxTensor tensor = bitmapToTensor(bmp, CLS_SHAPE)) {
+            OrtSession.Result res = clsSession.run(Map.of("x", tensor));
+            float[][] prob = (float[][]) res.get(0).getValue();
+            return prob[0][1] > 0.5f;
+        } finally {
+            if (bmp != null && !bmp.isRecycled()) {
+                bmp.recycle();
+            }
         }
     }
 
-    /* ========== 3. 识别 ========== */
     public String recognize(Bitmap crop) throws OrtException {
-        Bitmap bmp = resizeKeepAspect(crop, REC_SHAPE[2], REC_SHAPE[3]);
-        try (OnnxTensor tensor = bitmapToTensor(bmp, REC_SHAPE);   // [1,3,48,320]
-             OrtSession.Result res = recSession.run(Map.of("x", tensor))) {
-
-            // 输出节点 save_infer_model/scale_0.tmp_0 形状 (1,L,6625)
-            float[][][] logits = (float[][][]) res.get(0).getValue(); // [1][L][C]
-            int[] pred = ctcDecode(logits[0]);   // 只要第 0 张图
+        ResizeResult resizeResult = resizeKeepAspect(crop, REC_SHAPE[2], REC_SHAPE[3]);
+        Bitmap bmp = resizeResult.bitmap;
+        try (OnnxTensor tensor = bitmapToTensor(bmp, REC_SHAPE)) {
+            OrtSession.Result res = recSession.run(Map.of("x", tensor));
+            float[][][] logits = (float[][][]) res.get(0).getValue();
+            int[] pred = ctcDecode(logits[0]);
             return idxToStr(pred);
+        } finally {
+            if (bmp != null && !bmp.isRecycled()) {
+                bmp.recycle();
+            }
         }
     }
 
     /* ========== 完整端到端 ========== */
     public OcrResult runOcr(Bitmap src) throws OrtException {
-        List<RotatedBox> boxes = detect(src);
+        DetectResult detectResult = detect(src);
+        List<RotatedBox> boxes = detectResult.boxes;
         List<String> texts = new ArrayList<>();
-        // 重新计算在 detect() 方法内部使用的缩放比例，用于将坐标映射回来
-        float scale = Math.min((float) DET_SHAPE[3] / src.getWidth(), (float) DET_SHAPE[2] / src.getHeight());
 
+        int i = 0;
         for (RotatedBox b : boxes) {
-            Bitmap crop = cropBox(src, b, scale);
-            if (isRotated180(crop)) {
-                crop = rotate180(crop);
+            Bitmap crop = null;
+            Bitmap rotatedCrop = null;
+            try {
+                crop = cropBox(src, b, detectResult.scale, detectResult.padW, detectResult.padH);
+                saveToGallery(crop, "crop_" + System.currentTimeMillis() + "_" + (i++) + ".jpg");
+
+                Bitmap toRecognize = crop;
+                if (isRotated180(crop)) {
+                    rotatedCrop = rotate180(crop);
+                    toRecognize = rotatedCrop;
+                }
+
+                texts.add(recognize(toRecognize));
+            } finally {
+                // Clean up all created bitmaps
+                if (crop != null && !crop.isRecycled()) {
+                    crop.recycle();
+                }
+                if (rotatedCrop != null && !rotatedCrop.isRecycled()) {
+                    rotatedCrop.recycle();
+                }
             }
-            texts.add(recognize(crop));
         }
         return new OcrResult(boxes, texts);
     }
 
     /* ========== 工具 ========== */
     private OnnxTensor bitmapToTensor(Bitmap bmp, int[] shape) throws OrtException {
-        int H = shape[2], W = shape[3];
-        Bitmap rgb = Bitmap.createScaledBitmap(bmp, W, H, true);
+        int H = bmp.getHeight();
+        int W = bmp.getWidth();
         float[] buf = new float[shape[1] * H * W];
         int[] pixels = new int[W * H];
-        rgb.getPixels(pixels, 0, W, 0, 0, W, H);
+        bmp.getPixels(pixels, 0, W, 0, 0, W, H);
 
-        // 归一化
-        for (int i = 0; i < pixels.length; i++) {
-            int p = pixels[i];
+        for (int j = 0; j < pixels.length; j++) {
+            int p = pixels[j];
             float r = ((p >> 16) & 0xff) / 255.0f;
             float g = ((p >> 8) & 0xff) / 255.0f;
             float b = (p & 0xff) / 255.0f;
-            buf[i] = (r - MEAN[0]) / STD[0];
-            buf[H * W + i] = (g - MEAN[1]) / STD[1];
-            buf[H * W * 2 + i] = (b - MEAN[2]) / STD[2];
+            buf[j] = (r - MEAN[0]) / STD[0];
+            buf[H * W + j] = (g - MEAN[1]) / STD[1];
+            buf[H * W * 2 + j] = (b - MEAN[2]) / STD[2];
         }
 
+        FloatBuffer floatBuffer = FloatBuffer.wrap(buf);
         long[] longShape = Arrays.stream(shape).asLongStream().toArray();
-
-        // 1.23.1 可用：直接 ByteBuffer，无需 allocator 参数
-        ByteBuffer bb = ByteBuffer.allocateDirect(buf.length * 4)
-                .order(ByteOrder.LITTLE_ENDIAN);
-        for (float f : buf) bb.putFloat(f);
-        bb.flip();   // 复位 position
-
-        return OnnxTensor.createTensor(env, bb, longShape, OnnxJavaType.FLOAT);
+        return OnnxTensor.createTensor(env, floatBuffer, longShape);
     }
 
-    private List<String> loadDict(AssetManager am, String path) throws IOException {
-        List<String> list = new ArrayList<>();
-        list.add("blank");                 // CTC blank
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(am.open(path)))) {
-            String line;
-            while ((line = br.readLine()) != null) list.add(line.trim());
-            return list;
-        }
+    private ResizeResult resizeKeepAspect(Bitmap src, int tarH, int tarW) {
+        float scale = Math.min((float) tarW / src.getWidth(), (float) tarH / src.getHeight());
+        int scaledW = (int) (src.getWidth() * scale);
+        int scaledH = (int) (src.getHeight() * scale);
+
+        Bitmap scaledBmp = Bitmap.createScaledBitmap(src, scaledW, scaledH, true);
+        Bitmap letterboxedBmp = Bitmap.createBitmap(tarW, tarH, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(letterboxedBmp);
+
+        int padW = (tarW - scaledW) / 2;
+        int padH = (tarH - scaledH) / 2;
+
+        canvas.drawBitmap(scaledBmp, padW, padH, null);
+        scaledBmp.recycle();
+        return new ResizeResult(letterboxedBmp, scale, padW, padH);
     }
 
-    private byte[] readAsset(AssetManager am, String path) throws IOException {
-        try (InputStream is = am.open(path)) {
-            byte[] buf = new byte[is.available()];
-            is.read(buf);
-            return buf;
-        }
-    }
-
-    private Bitmap resizeKeepAspect(Bitmap src, int tarH, int tarW) {
-        float scale = Math.min(tarW / (float) src.getWidth(),
-                tarH / (float) src.getHeight());
-        int w = (int) (src.getWidth() * scale);
-        int h = (int) (src.getHeight() * scale);
-        return Bitmap.createScaledBitmap(src, w, h, true);
-    }
-
-    private Bitmap cropBox(Bitmap src, RotatedBox box, float scale) {
-        // 简易版：先按水平外接矩形扣图，实际可写透视变换
+    private Bitmap cropBox(Bitmap src, RotatedBox box, float scale, int padW, int padH) {
         Rect r = box.bound();
-        // 检测框的坐标是基于缩放后图片的，需要通过除以缩放比例，还原到原始图片坐标系中
-        int left = (int) (r.left / scale);
-        int top = (int) (r.top / scale);
-        int right = (int) (r.right / scale);
-        int bottom = (int) (r.bottom / scale);
+        int left = (int) ((r.left - padW) / scale);
+        int top = (int) ((r.top - padH) / scale);
+        int right = (int) ((r.right - padW) / scale);
+        int bottom = (int) ((r.bottom - padH) / scale);
 
-        // 裁剪坐标以确保它们在源位图的边界内，防止越界错误
         left = Math.max(0, left);
         top = Math.max(0, top);
         right = Math.min(src.getWidth(), right);
@@ -249,12 +261,37 @@ public class PaddleOrtEngine implements Closeable {
         int width = right - left;
         int height = bottom - top;
 
-        // 如果裁剪区域无效，则返回一个占位符位图以避免后续错误
         if (width <= 0 || height <= 0) {
             return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
         }
-
         return Bitmap.createBitmap(src, left, top, width, height);
+    }
+
+    private void saveToGallery(Bitmap bmp, String name) {
+        if (bmp == null) return;
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Images.Media.DISPLAY_NAME, name);
+        values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+        values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + File.separator + "CarPal");
+
+        Uri uri = null;
+        try {
+            ContentResolver contentResolver = this.context.getContentResolver();
+            uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+            if (uri != null) {
+                try (OutputStream outputStream = contentResolver.openOutputStream(uri)) {
+                    if (outputStream != null) {
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 100, outputStream);
+                        Log.i(TAG, "Saved image to gallery: " + uri);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            if (uri != null) {
+                this.context.getContentResolver().delete(uri, null, null);
+            }
+            Log.e(TAG, "Error saving image to gallery", e);
+        }
     }
 
     private Bitmap rotate180(Bitmap bmp) {
@@ -277,11 +314,31 @@ public class PaddleOrtEngine implements Closeable {
     }
 
     private String idxToStr(int[] idx) {
-
-        Log.i(TAG, "idxToStr: " + Arrays.toString(idx));
         StringBuilder sb = new StringBuilder();
         for (int i : idx) if (i < labelList.size()) sb.append(labelList.get(i));
         return sb.toString();
+    }
+
+    private List<String> loadDict(AssetManager am, String path) throws IOException {
+        List<String> list = new ArrayList<>();
+        list.add("blank");
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(am.open(path)))) {
+            String line;
+            while ((line = br.readLine()) != null) list.add(line.trim());
+        }
+        return list;
+    }
+
+    private byte[] readAsset(AssetManager am, String path) throws IOException {
+        try (InputStream is = am.open(path)) {
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            int nRead;
+            byte[] data = new byte[1024];
+            while ((nRead = is.read(data, 0, data.length)) != -1) {
+                buffer.write(data, 0, nRead);
+            }
+            return buffer.toByteArray();
+        }
     }
 
     @Override
@@ -297,8 +354,34 @@ public class PaddleOrtEngine implements Closeable {
     }
 
     /* ========== 简单数据结构 ========== */
+    private static class ResizeResult {
+        final Bitmap bitmap;
+        final float scale;
+        final int padW, padH;
+
+        public ResizeResult(Bitmap bitmap, float scale, int padW, int padH) {
+            this.bitmap = bitmap;
+            this.scale = scale;
+            this.padW = padW;
+            this.padH = padH;
+        }
+    }
+
+    public static class DetectResult {
+        public final List<RotatedBox> boxes;
+        public final float scale;
+        public final int padW, padH;
+
+        public DetectResult(List<RotatedBox> boxes, float scale, int padW, int padH) {
+            this.boxes = boxes;
+            this.scale = scale;
+            this.padW = padW;
+            this.padH = padH;
+        }
+    }
+
     public static class RotatedBox {
-        public final PointF[] pts;  // length=4，顺时针
+        public final PointF[] pts;
         public final float score;
 
         public RotatedBox(PointF[] p, float s) {
@@ -307,14 +390,10 @@ public class PaddleOrtEngine implements Closeable {
         }
 
         public Rect bound() {
-            int left = (int) Math.min(Math.min(pts[0].x, pts[1].x),
-                    Math.min(pts[2].x, pts[3].x));
-            int top = (int) Math.min(Math.min(pts[0].y, pts[1].y),
-                    Math.min(pts[2].y, pts[3].y));
-            int right = (int) Math.max(Math.max(pts[0].x, pts[1].x),
-                    Math.max(pts[2].x, pts[3].x));
-            int bot = (int) Math.max(Math.max(pts[0].y, pts[1].y),
-                    Math.max(pts[2].y, pts[3].y));
+            int left = (int) Math.min(Math.min(pts[0].x, pts[1].x), Math.min(pts[2].x, pts[3].x));
+            int top = (int) Math.min(Math.min(pts[0].y, pts[1].y), Math.min(pts[2].y, pts[3].y));
+            int right = (int) Math.max(Math.max(pts[0].x, pts[1].x), Math.max(pts[2].x, pts[3].x));
+            int bot = (int) Math.max(Math.max(pts[0].y, pts[1].y), Math.max(pts[2].y, pts[3].y));
             return new Rect(left, top, right, bot);
         }
     }
