@@ -51,7 +51,7 @@ public class CameraController {
         this.detectionCallback = detectionCallback;
 
 
-        try (InputStream inputStream = context.getAssets().open("road.jpeg")) {
+        try (InputStream inputStream = context.getAssets().open("road1.jpeg")) {
             debugPicture = BitmapFactory.decodeStream(inputStream);
         } catch (Exception ignored) {
         }
@@ -119,6 +119,7 @@ public class CameraController {
                     textRecognizeDetections(bitmap, detections);
 
                 }
+                Log.i(TAG, "Totle analyze time: " + (System.currentTimeMillis() - currentTime));
             }
             imageProxy.close();
         }

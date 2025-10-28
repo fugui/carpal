@@ -184,7 +184,6 @@ public class PaddleOrtEngine implements Closeable {
             Bitmap rotatedCrop = null;
             try {
                 crop = cropBox(src, b, detectResult.scale, detectResult.padW, detectResult.padH);
-                saveToGallery(crop, "crop_" + System.currentTimeMillis() + "_" + (i++) + ".jpg");
 
                 Bitmap toRecognize = crop;
                 if (isRotated180(crop)) {
@@ -265,33 +264,6 @@ public class PaddleOrtEngine implements Closeable {
             return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
         }
         return Bitmap.createBitmap(src, left, top, width, height);
-    }
-
-    private void saveToGallery(Bitmap bmp, String name) {
-        if (bmp == null) return;
-        ContentValues values = new ContentValues();
-        values.put(MediaStore.Images.Media.DISPLAY_NAME, name);
-        values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
-        values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + File.separator + "CarPal");
-
-        Uri uri = null;
-        try {
-            ContentResolver contentResolver = this.context.getContentResolver();
-            uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-            if (uri != null) {
-                try (OutputStream outputStream = contentResolver.openOutputStream(uri)) {
-                    if (outputStream != null) {
-                        bmp.compress(Bitmap.CompressFormat.JPEG, 100, outputStream);
-                        Log.i(TAG, "Saved image to gallery: " + uri);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            if (uri != null) {
-                this.context.getContentResolver().delete(uri, null, null);
-            }
-            Log.e(TAG, "Error saving image to gallery", e);
-        }
     }
 
     private Bitmap rotate180(Bitmap bmp) {
