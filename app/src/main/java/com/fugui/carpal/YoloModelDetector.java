@@ -271,7 +271,7 @@ public class YoloModelDetector {
                 );
 
                 String className = labels[classId];
-                results.add(new DetectionResult(boundingBox, maxScore, classId, className));
+                results.add(new DetectionResult(className, maxScore, boundingBox));
             }
         }
 

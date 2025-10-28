@@ -6,7 +6,6 @@ import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.RectF;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -21,27 +20,22 @@ import androidx.lifecycle.LifecycleOwner;
 
 import com.google.common.util.concurrent.ListenableFuture;
 
-import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
-
-import ai.onnxruntime.OrtException;
 
 public class CameraController {
 
     private static final String TAG = "CameraController";
-    private final Context context;
     private final LifecycleOwner lifecycleOwner;
     private final PreviewView previewView;
     private final VehicleDetector vehicleDetector;
     private final DetectionCallback detectionCallback;
     private ExecutorService cameraExecutor;
 
-    private static Bitmap debugPicture = null;
+    private Context context;
 
     public CameraController(Context context, LifecycleOwner lifecycleOwner, PreviewView previewView, VehicleDetector vehicleDetector, DetectionCallback detectionCallback) {
         this.context = context;
@@ -49,17 +43,11 @@ public class CameraController {
         this.previewView = previewView;
         this.vehicleDetector = vehicleDetector;
         this.detectionCallback = detectionCallback;
-
-
-        try (InputStream inputStream = context.getAssets().open("road1.jpeg")) {
-            debugPicture = BitmapFactory.decodeStream(inputStream);
-        } catch (Exception ignored) {
-        }
     }
 
     public void startCamera() {
         cameraExecutor = Executors.newSingleThreadExecutor();
-        ListenableFuture<ProcessCameraProvider> cameraProviderFuture = ProcessCameraProvider.getInstance(context);
+        ListenableFuture<ProcessCameraProvider> cameraProviderFuture = ProcessCameraProvider.getInstance(previewView.getContext());
 
         cameraProviderFuture.addListener(() -> {
             try {
@@ -81,7 +69,7 @@ public class CameraController {
             } catch (Exception e) {
                 Log.e(TAG, "Use case binding failed", e);
             }
-        }, ContextCompat.getMainExecutor(context));
+        }, ContextCompat.getMainExecutor(previewView.getContext()));
     }
 
     private static class FrameAnalyzer implements ImageAnalysis.Analyzer {
@@ -89,83 +77,89 @@ public class CameraController {
         private final DetectionCallback detectionCallback;
         private final AtomicLong lastAnalyzedTimestamp = new AtomicLong(0);
         private static final long ANALYSIS_INTERVAL_MS = 2000; // 2 seconds
-        private final PaddleOrtEngine paddleOrtEngine;
+
+        private static final boolean DEBUG_STATE = true;
+        private static Bitmap debugPicture = null;
 
         public FrameAnalyzer(Context context, VehicleDetector vehicleDetector, DetectionCallback detectionCallback) {
             this.vehicleDetector = vehicleDetector;
             this.detectionCallback = detectionCallback;
 
-            PaddleOrtEngine temp = null;
-            try {
-                temp = new PaddleOrtEngine(context, "det.onnx", "cls.onnx", "rec.onnx", "dict.txt");
-            } catch (IOException | OrtException e) {
-                Log.e(TAG, "Error initializing PaddleOrtEngine", e);
+            try (InputStream inputStream = context.getAssets().open("road1.jpeg")) {
+                debugPicture = BitmapFactory.decodeStream(inputStream);
+            } catch (Exception ignored) {
             }
-            paddleOrtEngine = temp;
-            Log.i(TAG, "Created PaddleOrtEngine: " + paddleOrtEngine);
-
         }
 
         @Override
         public void analyze(@NonNull ImageProxy imageProxy) {
             long currentTime = System.currentTimeMillis();
-            if (currentTime - lastAnalyzedTimestamp.get() >= ANALYSIS_INTERVAL_MS) {
-                lastAnalyzedTimestamp.set(currentTime);
+            if (currentTime - lastAnalyzedTimestamp.get() < ANALYSIS_INTERVAL_MS) {
+                imageProxy.close();
+                return;
+            }
+            lastAnalyzedTimestamp.set(currentTime);
 
-                Bitmap bitmap = debugPicture; // imageProxy.toBitmap(); //
-                if (bitmap != null) {
+            Bitmap bitmap = DEBUG_STATE ? debugPicture : imageProxy.toBitmap();
+            if (bitmap != null) {
+                Bitmap resultBitmap = null;
+                try {
+                    // Run detection and get results
+                    List<DetectionResult> detections = vehicleDetector.detect(bitmap, true); // Run with OCR
 
-                    List<DetectionResult> detections = vehicleDetector.detect(bitmap);
-                    textRecognizeDetections(bitmap, detections);
+                    // Draw detections on a new bitmap and send to the UI
+                    resultBitmap = drawDetections(bitmap, detections);
+                    detectionCallback.onDetections(resultBitmap);
 
+                } finally {
+                    // Recycle the original bitmap from the camera
+                    if (!bitmap.isRecycled() && !DEBUG_STATE ) {
+                        bitmap.recycle();
+                    }
+                    // The resultBitmap is sent to the UI, so it should not be recycled here.
                 }
-                Log.i(TAG, "Totle analyze time: " + (System.currentTimeMillis() - currentTime));
             }
             imageProxy.close();
         }
 
-        private void textRecognizeDetections(Bitmap bitmap, List<DetectionResult> detections) {
-
-            detections.forEach(detection -> {
-                Log.i(TAG, "OCR Start for : " + detection.getClassName());
-
-                RectF rectF = detection.getBoundingBox();
-                Bitmap oneCar = Bitmap.createBitmap(bitmap, (int) rectF.left, (int) rectF.top, (int) rectF.width(), (int) rectF.height());
-                try {
-                    PaddleOrtEngine.OcrResult ocrResult = paddleOrtEngine.runOcr(oneCar);
-
-                    String text = ocrResult.texts.stream().collect(Collectors.joining(","));
-                    Log.i(TAG, "OCR Result: " + text);
-
-                    detection.setText(text);
-                } catch (OrtException e) {
-                    Log.e(TAG, "OCR Text recognize failed: ", e);
-                }
-            });
-
-            detectionCallback.onDetections(drawDetections(bitmap, detections));
-        }
-
-        private Bitmap drawDetections(Bitmap bitmap, List<DetectionResult> detections) {
-            Bitmap mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true);
+        private Bitmap drawDetections(Bitmap originalBitmap, List<DetectionResult> detections) {
+            Bitmap mutableBitmap = originalBitmap.copy(Bitmap.Config.ARGB_8888, true);
             Canvas canvas = new Canvas(mutableBitmap);
             Paint paint = new Paint();
             paint.setColor(Color.RED);
             paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(2.0f);
-            paint.setTextSize(30.0f);
+            paint.setStrokeWidth(3.0f);
+            paint.setTextSize(40.0f);
+            paint.setTextAlign(Paint.Align.LEFT);
+
+            Paint textBgPaint = new Paint();
+            textBgPaint.setColor(Color.argb(150, 0, 0, 0)); // Semi-transparent black background
+            textBgPaint.setStyle(Paint.Style.FILL);
 
             for (DetectionResult detection : detections) {
+                // Draw bounding box
                 canvas.drawRect(detection.getBoundingBox(), paint);
-                String label = detection.getClassName() + ": " + String.format("%.2f", detection.getConfidence());
-                canvas.drawText(label, detection.getBoundingBox().left, detection.getBoundingBox().top - 10, paint);
-                if (detection.getText() != null && !detection.getText().isEmpty())
-                    canvas.drawText(detection.getText(), detection.getBoundingBox().left, detection.getBoundingBox().top + 25, paint);
+
+                // Prepare text labels
+                String yoloLabel = detection.getClassName() + ": " + String.format("%.2f", detection.getConfidence());
+                String ocrLabel = detection.getText();
+
+                // Draw background for YOLO label
+                canvas.drawRect(detection.getBoundingBox().left, detection.getBoundingBox().top - 45,
+                        detection.getBoundingBox().left + paint.measureText(yoloLabel), detection.getBoundingBox().top, textBgPaint);
+                // Draw YOLO label
+                canvas.drawText(yoloLabel, detection.getBoundingBox().left, detection.getBoundingBox().top - 5, paint);
+
+                // Draw background and text for OCR label if it exists
+                if (ocrLabel != null && !ocrLabel.isEmpty()) {
+                    canvas.drawRect(detection.getBoundingBox().left, detection.getBoundingBox().top,
+                            detection.getBoundingBox().left + paint.measureText(ocrLabel), detection.getBoundingBox().top + 45, textBgPaint);
+                    canvas.drawText(ocrLabel, detection.getBoundingBox().left, detection.getBoundingBox().top + 40, paint);
+                }
             }
             return mutableBitmap;
         }
     }
-
 
     public void stopCamera() {
         if (cameraExecutor != null) {

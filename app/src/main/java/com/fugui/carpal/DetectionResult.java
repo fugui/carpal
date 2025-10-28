@@ -3,25 +3,28 @@ package com.fugui.carpal;
 import android.graphics.RectF;
 
 public class DetectionResult {
-    private RectF boundingBox;
-    private float confidence;
-    private int classId;
-    private String className;
-
+    private final String className;
+    private final float confidence;
+    private final RectF boundingBox;
     private String text;
 
-    public DetectionResult(RectF boundingBox, float confidence, int classId, String className) {
-        this.boundingBox = boundingBox;
-        this.confidence = confidence;
-        this.classId = classId;
+    public DetectionResult(String className, float confidence, RectF boundingBox) {
         this.className = className;
+        this.confidence = confidence;
+        this.boundingBox = boundingBox;
     }
 
-    // Getters
-    public RectF getBoundingBox() { return boundingBox; }
-    public float getConfidence() { return confidence; }
-    public int getClassId() { return classId; }
-    public String getClassName() { return className; }
+    public String getClassName() {
+        return className;
+    }
+
+    public float getConfidence() {
+        return confidence;
+    }
+
+    public RectF getBoundingBox() {
+        return boundingBox;
+    }
 
     public String getText() {
         return text;

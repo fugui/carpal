@@ -22,10 +22,9 @@ public class MainActivity extends AppCompatActivity implements DetectionCallback
 
     private static final String TAG = "MainActivity";
     private static final int REQUEST_CODE_PERMISSIONS = 10;
-    private static final String[] REQUIRED_PERMISSIONS = new String[]{Manifest.permission.CAMERA, Manifest.permission.ACCESS_FINE_LOCATION};
+    private static final String[] REQUIRED_PERMISSIONS = {Manifest.permission.CAMERA, Manifest.permission.ACCESS_FINE_LOCATION};
 
     private CameraController cameraController;
-    private VehicleDetector vehicleDetector;
     private ImageView imageView;
 
     @Override
@@ -34,24 +33,22 @@ public class MainActivity extends AppCompatActivity implements DetectionCallback
         setContentView(R.layout.activity_main);
 
         imageView = findViewById(R.id.imageView);
+        PreviewView viewFinder = findViewById(R.id.viewFinder);
 
         try {
-            // IMPORTANT: Replace "yolo_model.onnx" with the actual name of your model file in the assets folder.
-            vehicleDetector = new VehicleDetector(this, "yolo11m.onnx");
+            // VehicleDetector now internally manages both YOLO and OCR engines.
+            VehicleDetector vehicleDetector = new VehicleDetector(this, "yolo11m.onnx");
+            cameraController = new CameraController(this, this, viewFinder, vehicleDetector, this);
+
+            if (allPermissionsGranted()) {
+                cameraController.startCamera();
+            } else {
+                ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS);
+            }
         } catch (OrtException | IOException e) {
-            Log.e(TAG, "Error initializing VehicleDetector", e);
-            Toast.makeText(this, "Failed to load model.", Toast.LENGTH_LONG).show();
+            Log.e(TAG, "Error initializing detectors", e);
+            Toast.makeText(this, "Failed to load models.", Toast.LENGTH_LONG).show();
             finish();
-            return;
-        }
-
-        PreviewView viewFinder = findViewById(R.id.viewFinder);
-        cameraController = new CameraController(this, this, viewFinder, vehicleDetector, this);
-
-        if (allPermissionsGranted()) {
-            cameraController.startCamera();
-        } else {
-            ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS);
         }
     }
 
@@ -87,6 +84,11 @@ public class MainActivity extends AppCompatActivity implements DetectionCallback
 
     @Override
     public void onDetections(Bitmap imageWithDetections) {
-        runOnUiThread(() -> imageView.setImageBitmap(imageWithDetections));
+        // The callback is on a background thread, so post to the UI thread to update the ImageView.
+        runOnUiThread(() -> {
+            if (imageWithDetections != null && !imageWithDetections.isRecycled()) {
+                imageView.setImageBitmap(imageWithDetections);
+            }
+        });
     }
 }
