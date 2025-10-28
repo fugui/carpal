@@ -2,7 +2,6 @@ package com.fugui.carpal;
 
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -20,7 +19,6 @@ import androidx.lifecycle.LifecycleOwner;
 
 import com.google.common.util.concurrent.ListenableFuture;
 
-import java.io.InputStream;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,10 +33,7 @@ public class CameraController {
     private final DetectionCallback detectionCallback;
     private ExecutorService cameraExecutor;
 
-    private Context context;
-
     public CameraController(Context context, LifecycleOwner lifecycleOwner, PreviewView previewView, VehicleDetector vehicleDetector, DetectionCallback detectionCallback) {
-        this.context = context;
         this.lifecycleOwner = lifecycleOwner;
         this.previewView = previewView;
         this.vehicleDetector = vehicleDetector;
@@ -60,7 +55,7 @@ public class CameraController {
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
 
-                imageAnalysis.setAnalyzer(cameraExecutor, new FrameAnalyzer(context, vehicleDetector, detectionCallback));
+                imageAnalysis.setAnalyzer(cameraExecutor, new FrameAnalyzer(vehicleDetector, detectionCallback));
 
                 cameraProvider.unbindAll();
                 cameraProvider.bindToLifecycle(
@@ -78,17 +73,9 @@ public class CameraController {
         private final AtomicLong lastAnalyzedTimestamp = new AtomicLong(0);
         private static final long ANALYSIS_INTERVAL_MS = 2000; // 2 seconds
 
-        private static final boolean DEBUG_STATE = true;
-        private static Bitmap debugPicture = null;
-
-        public FrameAnalyzer(Context context, VehicleDetector vehicleDetector, DetectionCallback detectionCallback) {
+        public FrameAnalyzer(VehicleDetector vehicleDetector, DetectionCallback detectionCallback) {
             this.vehicleDetector = vehicleDetector;
             this.detectionCallback = detectionCallback;
-
-            try (InputStream inputStream = context.getAssets().open("road1.jpeg")) {
-                debugPicture = BitmapFactory.decodeStream(inputStream);
-            } catch (Exception ignored) {
-            }
         }
 
         @Override
@@ -100,23 +87,22 @@ public class CameraController {
             }
             lastAnalyzedTimestamp.set(currentTime);
 
-            Bitmap bitmap = DEBUG_STATE ? debugPicture : imageProxy.toBitmap();
+            Bitmap bitmap = imageProxy.toBitmap();
             if (bitmap != null) {
                 Bitmap resultBitmap = null;
+                List<DetectionResult> detections = null;
                 try {
-                    // Run detection and get results
-                    List<DetectionResult> detections = vehicleDetector.detect(bitmap, true); // Run with OCR
+                    long startTime = System.currentTimeMillis();
+                    detections = vehicleDetector.detect(bitmap, true); // Run with OCR
+                    long endTime = System.currentTimeMillis();
+                    Log.i(TAG, "vehicleDetector.detect duration: " + (endTime - startTime) + "ms");
 
-                    // Draw detections on a new bitmap and send to the UI
                     resultBitmap = drawDetections(bitmap, detections);
-                    detectionCallback.onDetections(resultBitmap);
-
+                    detectionCallback.onDetections(resultBitmap, detections);
                 } finally {
-                    // Recycle the original bitmap from the camera
-                    if (!bitmap.isRecycled() && !DEBUG_STATE ) {
+                    if (bitmap != null && !bitmap.isRecycled()) {
                         bitmap.recycle();
                     }
-                    // The resultBitmap is sent to the UI, so it should not be recycled here.
                 }
             }
             imageProxy.close();
@@ -137,23 +123,18 @@ public class CameraController {
             textBgPaint.setStyle(Paint.Style.FILL);
 
             for (DetectionResult detection : detections) {
-                // Draw bounding box
                 canvas.drawRect(detection.getBoundingBox(), paint);
 
-                // Prepare text labels
                 String yoloLabel = detection.getClassName() + ": " + String.format("%.2f", detection.getConfidence());
                 String ocrLabel = detection.getText();
 
-                // Draw background for YOLO label
                 canvas.drawRect(detection.getBoundingBox().left, detection.getBoundingBox().top - 45,
-                        detection.getBoundingBox().left + paint.measureText(yoloLabel), detection.getBoundingBox().top, textBgPaint);
-                // Draw YOLO label
+                 detection.getBoundingBox().left + paint.measureText(yoloLabel), detection.getBoundingBox().top, textBgPaint);
                 canvas.drawText(yoloLabel, detection.getBoundingBox().left, detection.getBoundingBox().top - 5, paint);
 
-                // Draw background and text for OCR label if it exists
                 if (ocrLabel != null && !ocrLabel.isEmpty()) {
                     canvas.drawRect(detection.getBoundingBox().left, detection.getBoundingBox().top,
-                            detection.getBoundingBox().left + paint.measureText(ocrLabel), detection.getBoundingBox().top + 45, textBgPaint);
+                     detection.getBoundingBox().left + paint.measureText(ocrLabel), detection.getBoundingBox().top + 45, textBgPaint);
                     canvas.drawText(ocrLabel, detection.getBoundingBox().left, detection.getBoundingBox().top + 40, paint);
                 }
             }

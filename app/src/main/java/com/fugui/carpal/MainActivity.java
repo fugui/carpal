@@ -6,6 +6,7 @@ import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.util.Log;
 import android.widget.ImageView;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -15,6 +16,8 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import java.io.IOException;
+import java.util.List;
+import java.util.stream.Collectors;
 
 import ai.onnxruntime.OrtException;
 
@@ -26,6 +29,7 @@ public class MainActivity extends AppCompatActivity implements DetectionCallback
 
     private CameraController cameraController;
     private ImageView imageView;
+    private TextView detectionTextView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -33,10 +37,10 @@ public class MainActivity extends AppCompatActivity implements DetectionCallback
         setContentView(R.layout.activity_main);
 
         imageView = findViewById(R.id.imageView);
+        detectionTextView = findViewById(R.id.detection_textview);
         PreviewView viewFinder = findViewById(R.id.viewFinder);
 
         try {
-            // VehicleDetector now internally manages both YOLO and OCR engines.
             VehicleDetector vehicleDetector = new VehicleDetector(this, "yolo11m.onnx");
             cameraController = new CameraController(this, this, viewFinder, vehicleDetector, this);
 
@@ -83,12 +87,18 @@ public class MainActivity extends AppCompatActivity implements DetectionCallback
     }
 
     @Override
-    public void onDetections(Bitmap imageWithDetections) {
-        // The callback is on a background thread, so post to the UI thread to update the ImageView.
+    public void onDetections(Bitmap imageWithDetections, List<DetectionResult> detections) {
         runOnUiThread(() -> {
+            // Update the ImageView with the annotated bitmap
             if (imageWithDetections != null && !imageWithDetections.isRecycled()) {
                 imageView.setImageBitmap(imageWithDetections);
             }
+
+            // Format and display the detection results in the TextView
+            String detectionText = detections.stream()
+                    .map(d -> d.getClassName() + (d.getText() != null ? ": " + d.getText() : ""))
+                    .collect(Collectors.joining("\n"));
+            detectionTextView.setText(detectionText);
         });
     }
 }
